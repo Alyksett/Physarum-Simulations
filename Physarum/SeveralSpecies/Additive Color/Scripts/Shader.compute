@@ -1,0 +1,175 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Main
+#pragma kernel Update
+
+static const float4 identity = float4(1,1,1,1);
+
+
+
+RWTexture2D<float4> AgentMap;
+RWTexture2D<float4> TrailMap;
+
+struct Agent{
+    float2 pos;
+    float2 v;
+    float4 species; 
+    float speed;
+    float angle;
+};
+
+RWStructuredBuffer<Agent> Agents;
+
+
+float DTime;
+int clock;
+int NumAgents;
+int WIDTH;
+int HEIGHT;
+float speed;
+float control1;
+float control2;
+float randControl;
+float steerControl;
+float accelerationScale;
+
+
+
+float R;
+float G;
+float B;
+int brightness;
+int seed;
+
+float hash(uint state)
+{
+    state ^= 2747636419u;
+    state *= 2654435769u;
+    state ^= state >> 16;
+    state *= 2654435769u;
+    state ^= state >> 16;
+    state *= 2654435769u;
+    return state/4294967295.0000;
+}
+
+[numthreads(16,16,1)]
+void Main (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < 0 || id.x >= (uint)WIDTH || id.y < 0 || id.y >= (uint)HEIGHT) {
+		return;
+	}
+	float4 sum = 0;
+	float4 originalCol = TrailMap[id.xy];
+	
+
+	for (int offsetX = -1; offsetX <= 1; offsetX ++) {
+		for (int offsetY = -1; offsetY <= 1; offsetY ++) {
+			int sampleX = min(WIDTH-1, max(0, id.x + offsetX));
+			int sampleY = min(HEIGHT-1, max(0, id.y + offsetY));
+			sum += TrailMap[int2(sampleX,sampleY)];
+		}
+	}
+    float diffuseRate = control1;
+    float decayRate = control2;
+	float4 blurredCol = sum / 9;
+
+	float diffuseWeight = saturate(float(diffuseRate * DTime));
+	blurredCol = originalCol * (1 - diffuseWeight) + blurredCol * (diffuseWeight);    
+
+	// AgentMap[id.xy] = blurredCol * saturate(1 - decayRate * DTime);
+	TrailMap[id.xy] = max(0, blurredCol - decayRate * DTime);
+}
+
+
+float3 sniff(float2 p, float r, float ang, float2 vel, float4 species){
+    float2 inertia = vel/length(vel);  
+    float sensDist = 5;
+    float2 sensPos = p + float2(cos(ang)*sensDist, sin(ang)*sensDist);
+    float4 locAmount;
+    float weight;
+    float2 weightedCoords;
+    float cum = 0.0;
+
+    for(int dy = -1; dy<2; dy++){
+        for(int dx = -1; dx<2; dx++){
+            
+            locAmount = TrailMap[uint2(dx + sensPos.x, dy + sensPos.y)];
+            float2 unit = float2(dx, dy);
+            
+            float specWeight = dot(species*2-1, locAmount);
+            float w = max(0, dot(unit, inertia));
+            // weight = ((length(locAmount))*2 + w)/2;
+            weight = specWeight*w;            
+            
+            cum += weight;
+
+            weightedCoords += float2(dx*weight,dy*weight);
+        }
+    }
+    weightedCoords /= 7.9;
+    weightedCoords *= DTime;
+    weightedCoords *= steerControl;
+    weightedCoords += sensPos;
+    cum /= accelerationScale;
+    
+    float x = weightedCoords.x - p.x;
+    float y = weightedCoords.y - p.y;
+    float newAngle = atan2(y, x);
+    
+    float3 res = float3(newAngle, cum, distance(weightedCoords, sensPos));
+    return res;
+}
+
+[numthreads(32,32,1)]
+void Update (uint3 id : SV_DispatchThreadID){
+    if(id.x * WIDTH + id.y > NumAgents){
+        return;
+    }
+
+    Agent a = Agents[id.x * WIDTH + id.y];
+    
+    float seed = a.pos.y * a.pos.x + HEIGHT;
+    float r = (hash(seed)*6.28);
+    float2 n = float2(cos(r)*randControl, sin(r)*randControl);
+
+    float3 res = sniff(a.pos, r,  a.angle, a.v, a.species);
+
+    float mag = res.y;
+    a.angle = res.x;
+    float dist = res.z;
+    
+    float inertia = max(0.1, mag*mag);
+    
+    float scaling = speed * a.speed ;
+
+    float finalSpeed = scaling * inertia;
+
+    float2 velocity = float2(cos(a.angle) * finalSpeed * DTime, sin(a.angle) * finalSpeed * DTime);
+    
+    a.pos += a.v + velocity;
+    a.pos += n;
+    a.v += velocity;
+    
+    a.v *= .5;
+
+    if(a.pos.x < 0){
+        a.pos.x = WIDTH;
+    }
+    if(a.pos.x > WIDTH){
+        a.pos.x = 0;
+    }
+    if(a.pos.y < 0){
+        a.pos.y = HEIGHT;
+    }
+    if(a.pos.y > HEIGHT){
+        a.pos.y = 0;
+    }
+
+    Agents[id.x * WIDTH + id.y] = a;
+    // AgentMap[int2(a.pos.x, a.pos.y)] = a.color;
+    float am = 1;
+
+    AgentMap[int2(a.pos.x, a.pos.y)] = float4(am, am, am, am);
+    // TrailMap[int2(a.pos.x, a.pos.y)] = a.color;
+    TrailMap[int2(a.pos.x, a.pos.y)] += a.species/4+0.01;
+    
+}
